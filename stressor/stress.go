@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 

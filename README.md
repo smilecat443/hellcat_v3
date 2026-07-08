@@ -1,6 +1,6 @@
 # HellCat
 
-A high–intensity VLESS pentesting-testing tool using xray-core and Go.
+A high–intensity VLESS/SS/TROJAN/HYSTERIA/VMESS pentesting-testing stress tool using xray-core and Go.
 
 Use only in pentest your servers!
 
@@ -22,7 +22,7 @@ Use only in pentest your servers!
 
 1. **Clone the repo**  
    ```bash
-   git clone https://github.com/hellcat443/hellcat.git
+   git clone https://github.com/smilecat666/hellcat.git
    cd HellCat
 2. **Run the installer**  
    ```bash

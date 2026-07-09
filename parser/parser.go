@@ -1,3 +1,5 @@
+// [hellcat]
+
 package parser
 
 import (
@@ -92,29 +94,35 @@ type HappyEyeballs struct {
 type VnextSettings struct {
     Vnext []Vnext `json:"vnext"`
 }
+
 type Vnext struct {
     Address string `json:"address"`
     Port    int    `json:"port"`
     Users   []User `json:"users"`
 }
+
 type User struct {
     Id         string `json:"id"`
     Encryption string `json:"encryption"`
+    Flow       string `json:"flow,omitempty"`
     Level      int    `json:"level"`
 }
 
 type VMessSettings struct {
     Vnext []VMessVnext `json:"vnext"`
 }
+
 type VMessVnext struct {
     Address string      `json:"address"`
     Port    int         `json:"port"`
     Users   []VMessUser `json:"users"`
 }
+
 type VMessUser struct {
     Id       string `json:"id"`
     AlterId  int    `json:"alterId"`
     Security string `json:"security"`
+    Flow     string `json:"flow,omitempty"`
 }
 
 // ===== Settings: SS / Trojan / Hy2 / Tuic =====
@@ -122,6 +130,7 @@ type VMessUser struct {
 type ServerSettings struct {
     Servers []ServerEntry `json:"servers"`
 }
+
 type ServerEntry struct {
     Address               string   `json:"address"`
     Port                  int      `json:"port"`
@@ -253,6 +262,7 @@ func ParseVLESS(rawURL string) (*OutboundConfig, error) {
     if enc == "" {
         enc = "none"
     }
+    flow := q.Get("flow") // Чтение параметра flow
 
     stream := &StreamSetting{
         Network:   transport,
@@ -338,6 +348,7 @@ func ParseVLESS(rawURL string) (*OutboundConfig, error) {
                 Users: []User{{
                     Id:         uuid,
                     Encryption: enc,
+                    Flow:       flow, // Добавление flow (если пусто, omitempty не запишет поле в JSON)
                     Level:      8,
                 }},
             }},
@@ -363,6 +374,7 @@ type vmessLink struct {
     Sni  string `json:"sni"`
     Alpn string `json:"alpn"`
     Fp   string `json:"fp"`
+    Flow string `json:"flow"`
 }
 
 func ParseVMess(rawURL string) (*OutboundConfig, error) {
@@ -446,6 +458,7 @@ func ParseVMess(rawURL string) (*OutboundConfig, error) {
                     Id:       v.Id,
                     AlterId:  aid,
                     Security: v.Scy,
+                    Flow:     v.Flow, // Добавление flow (если пусто, omitempty не запишет поле в JSON)
                 }},
             }},
         },

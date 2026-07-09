@@ -28,27 +28,37 @@ func main() {
     customTarget := flag.String("target", "", "Custom download URL (overrides built-in list)")
     flag.Parse()
 
-    var urls []string
+    var configs []*parser.OutboundConfig
+
     if *vlessURL != "" {
-        urls = append(urls, *vlessURL)
+        cfg, err := parser.Parse(*vlessURL)
+        if err != nil {
+            log.Fatalf("[!] Parse error: %v", err)
+        }
+        configs = append(configs, cfg)
     } else if *listFile != "" {
         data, err := os.ReadFile(*listFile)
         if err != nil {
             log.Fatalf("Failed to read file: %v", err)
         }
-        urls = parser.Lines(string(data))
+        urls := parser.Lines(string(data))
+        for _, raw := range urls {
+            cfg, err := parser.Parse(raw)
+            if err != nil {
+                log.Printf("[!] Parse error (%s): %v", raw[:min(40, len(raw))], err)
+                continue
+            }
+            configs = append(configs, cfg)
+        }
     } else {
         log.Fatal("Specify --url or --list")
     }
 
-    for _, raw := range urls {
-        cfg, err := parser.Parse(raw)
-        if err != nil {
-            log.Printf("[!] Parse error (%s): %v", raw[:min(40, len(raw))], err)
-            continue
-        }
-        stressor.Run(cfg, *threadCount, *duration, *numXray, *insane, *stealth, *customTarget)
+    if len(configs) == 0 {
+        log.Fatal("No valid proxy links found.")
     }
+
+    stressor.Run(configs, *threadCount, *duration, *numXray, *insane, *stealth, *customTarget)
 }
 
 func min(a, b int) int {

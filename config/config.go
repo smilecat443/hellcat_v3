@@ -8,6 +8,7 @@ import (
     "log"
     "os"
     "time"
+
     "hellcat/parser"
 )
 
@@ -26,7 +27,6 @@ func Generate(cfg *parser.OutboundConfig) string {
 }
 
 func GenerateWithPort(cfg *parser.OutboundConfig, port int) string {
-    // SOCKS inbound
     inbound := map[string]interface{}{
         "port":     port,
         "listen":   "127.0.0.1",
@@ -34,14 +34,12 @@ func GenerateWithPort(cfg *parser.OutboundConfig, port int) string {
         "settings": map[string]interface{}{"auth": "noauth"},
     }
 
-    // Основной outbound
     outbound := map[string]interface{}{
         "protocol": cfg.Protocol,
         "tag":      cfg.Tag,
-        "settings": cfg.Settings, // уже правильный тип
+        "settings": cfg.Settings,
     }
 
-    // streamSettings оставляем как есть (уже заполнен парсером)
     if cfg.StreamSetting != nil {
         stream := map[string]interface{}{}
         stream["network"] = cfg.StreamSetting.Network
@@ -62,11 +60,10 @@ func GenerateWithPort(cfg *parser.OutboundConfig, port int) string {
         if cfg.StreamSetting.XhttpSettings != nil {
             stream["xhttpSettings"] = cfg.StreamSetting.XhttpSettings
         }
-        
+
         outbound["streamSettings"] = stream
     }
 
-    // Mux (по желанию)
     if cfg.Mux.Enabled {
         outbound["mux"] = map[string]interface{}{
             "enabled":     cfg.Mux.Enabled,

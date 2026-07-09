@@ -1,5 +1,4 @@
 // [hellcat]
-
 package stressor
 
 import (
@@ -21,7 +20,6 @@ import (
     "hellcat/parser"
 )
 
-// Псевдонагрузка: популярные сайты и пути
 var stealthURLs = []string{
     "https://www.google.com/",
     "https://www.google.com/search?q=test",
@@ -64,14 +62,13 @@ var stealthURLs = []string{
     "https://www.telegram.org/",
 }
 
-// Тяжёлые файлы для обычного и insane режима
 var payloads = []string{
-    "https://speed.cloudflare.com/__down?bytes=10737418240", // 10 GB
-    "https://speed.cloudflare.com/__down?bytes=5368709120",  // 5 GB
-    "https://speed.cloudflare.com/__down?bytes=2147483648",  // 2 GB
-    "https://speed.cloudflare.com/__down?bytes=1073741824",  // 1 GB
-    "https://speed.cloudflare.com/__down?bytes=536870912",   // 512 MB
-    "https://speed.cloudflare.com/__down?bytes=268435456",   // 256 MB
+    "https://speed.cloudflare.com/__down?bytes=10737418240",
+    "https://speed.cloudflare.com/__down?bytes=5368709120",
+    "https://speed.cloudflare.com/__down?bytes=2147483648",
+    "https://speed.cloudflare.com/__down?bytes=1073741824",
+    "https://speed.cloudflare.com/__down?bytes=536870912",
+    "https://speed.cloudflare.com/__down?bytes=268435456",
     "http://speedtest.tele2.net/10GB.zip",
     "http://speedtest.tele2.net/1GB.zip",
     "http://proof.ovh.net/files/10Gb.dat",
@@ -104,20 +101,18 @@ const (
     maxConcurrentDownloadsInsane = 200
     maxDownloadBytesInsane       = 100 * 1024 * 1024
     maxGoroutines                = 50000
-    stealthMaxBytes              = 2 * 1024 * 1024 // 2 MB max для стелс-запросов
+    stealthMaxBytes              = 2 * 1024 * 1024
 )
 
-// getRandomPort находит случайный свободный порт для создания уникального конфига
 func getRandomPort() int {
     for i := 0; i < 100; i++ {
-        port := rand.Intn(55000) + 10000 // Диапазон от 10000 до 64999
+        port := rand.Intn(55000) + 10000
         ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
         if err == nil {
             ln.Close()
             return port
         }
     }
-    // Фоллбэк, позволяем ОС выбрать случайный свободный порт
     ln, err := net.Listen("tcp", "127.0.0.1:0")
     if err != nil {
         return 0
@@ -127,15 +122,13 @@ func getRandomPort() int {
     return port
 }
 
-func Run(cfg *parser.OutboundConfig, threads int, duration int, numXray int, insane bool, stealth bool, customTarget string) {
+func Run(cfgs []*parser.OutboundConfig, threads int, duration int, numXray int, insane bool, stealth bool, customTarget string) {
     stealthMode = stealth
     customURL = customTarget
 
     if customURL != "" {
         payloads = []string{customURL}
     }
-
-    targetInfo := getTargetInfo(cfg)
 
     modeStr := "HEAVY"
     if stealthMode {
@@ -149,7 +142,17 @@ func Run(cfg *parser.OutboundConfig, threads int, duration int, numXray int, ins
     }
 
     log.Printf("[hellcat] 📊 %d xray × %d threads", numXray, threads)
-    log.Printf("[hellcat] 🎯 %s (%s)", targetInfo, cfg.Protocol)
+    log.Printf("[hellcat] 🎯 Loaded %d targets from list", len(cfgs))
+    
+    // Если больше 1 цели — выводим весь список
+    if len(cfgs) > 1 {
+        for i, c := range cfgs {
+            log.Printf("[hellcat] 🌐 [%d/%d] %s (%s)", i+1, len(cfgs), getTargetInfo(c), c.Protocol)
+        }
+    } else if len(cfgs) == 1 {
+        log.Printf("[hellcat] 🌐 Primary: %s (%s)", getTargetInfo(cfgs[0]), cfgs[0].Protocol)
+    }
+
     if duration > 0 {
         log.Printf("[hellcat] ⏱️  Duration: %d sec", duration)
     }
@@ -164,17 +167,18 @@ func Run(cfg *parser.OutboundConfig, threads int, duration int, numXray int, ins
 
     proxies := make([]string, numXray)
     var configFiles []string
-    
+
     log.Println("[hellcat] ⏳ Generating random configs and starting Xray instances...")
     for i := 0; i < numXray; i++ {
-        port := getRandomPort() // Получаем уникальный случайный порт
+        cfg := cfgs[i%len(cfgs)]
+        port := getRandomPort()
         confPath := config.GenerateWithPort(cfg, port)
         configFiles = append(configFiles, confPath)
         proxies[i] = fmt.Sprintf("socks5h://127.0.0.1:%d", port)
         go startXray(confPath, i, port)
         time.Sleep(150 * time.Millisecond)
     }
-    
+
     log.Println("[hellcat] ⏳ Waiting for SOCKS proxies...")
     waitForProxies(proxies)
 
@@ -257,7 +261,7 @@ func Run(cfg *parser.OutboundConfig, threads int, duration int, numXray int, ins
             goto cleanup
         case <-ticker.C:
             succ := atomic.SwapUint64(&requests, 0)
-            atomic.SwapUint64(&errors, 0) // Сбрасываем ошибки без вывода
+            atomic.SwapUint64(&errors, 0)
             bytes := atomic.SwapUint64(&bytesDownloaded, 0)
             mb := float64(bytes) / 1024 / 1024
             goroutines := runtime.NumGoroutine()
@@ -289,7 +293,6 @@ func stealthRequest(client *http.Client) {
     }
     defer resp.Body.Close()
 
-    // Читаем до 2 MB и засчитываем как хороший запрос независимо от HTTP статуса
     n, _ := io.CopyN(io.Discard, resp.Body, stealthMaxBytes)
     atomic.AddUint64(&bytesDownloaded, uint64(n))
     atomic.AddUint64(&requests, 1)
@@ -310,8 +313,6 @@ func downloadOnce(client *http.Client) {
     maxBytes := (1 + rand.Intn(5)) * 1024 * 1024
     n, _ := io.CopyN(io.Discard, resp.Body, int64(maxBytes))
     atomic.AddUint64(&bytesDownloaded, uint64(n))
-    
-    // Засчитываем как успех при любом ответе от сервера (301, 400, 502 и тд)
     atomic.AddUint64(&requests, 1)
 }
 
@@ -327,11 +328,8 @@ func downloadInsane(client *http.Client) {
     }
     defer resp.Body.Close()
 
-    // Правильная загрузка: читаем до лимита и учитываем скачанные байты в статистике
     n, _ := io.CopyN(io.Discard, resp.Body, int64(maxDownloadBytesInsane))
     atomic.AddUint64(&bytesDownloaded, uint64(n))
-    
-    // Засчитываем как успех при любом ответе от сервера
     atomic.AddUint64(&requests, 1)
 }
 

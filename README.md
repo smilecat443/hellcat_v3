@@ -30,6 +30,5 @@ Use only in pentest your servers!
     ./install.sh
 3. **Build the HellCat binary** 
    ```bash 
-    go mod init hellcat
     go mod tidy
     go build -o hellcat main.go

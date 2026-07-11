@@ -19,9 +19,9 @@ func main() {
 
     vlessURL := flag.String("url", "", "Proxy link (vless/vmess/trojan/ss/hy2/tuic)")
     listFile := flag.String("list", "", "File with links")
-    threadCount := flag.Int("threads", 200, "Threads per proxy (было 50)")       // 🔥 УВЕЛИЧЕНО
+    threadCount := flag.Int("threads", 200, "Threads per proxy (default 200)")       
     duration := flag.Int("duration", 0, "Duration in seconds (0=infinite)")
-    numXray := flag.Int("instances", 20, "Number of xray-core processes (было 10)") // 🔥 УВЕЛИЧЕНО
+    numXray := flag.Int("instances", 20, "Number of xray-core processes (default 20)") 
     insane := flag.Bool("insane", false, "Insane mode (2x workers, burst=8)")
     stealth := flag.Bool("stealth", false, "Use pseudo-load instead of heavy downloads")
     customTarget := flag.String("target", "", "Custom download URL (overrides built-in list)")

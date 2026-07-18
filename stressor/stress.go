@@ -37,8 +37,8 @@ const (
     workerJitter       = 50 * time.Millisecond
     httpTimeout        = 40 * time.Second
     stealthTimeout     = 20 * time.Second
-    errorSleepBase     = 200 * time.Millisecond
-    errorSleepJitter   = 800 * time.Millisecond
+    errorSleepBase     = 1000 * time.Millisecond
+    errorSleepJitter   = 2000 * time.Millisecond
     statsInterval      = 3 * time.Second
     cpuMonitorInterval = 1 * time.Second
     maxThrottleMs      = 5000
@@ -101,7 +101,7 @@ var defaultStealthURLs = []string{
     "https://www.spotify.com/",
     "https://www.twitch.tv/",
     "https://www.imdb.com/",
-    "https://www.khanacademy.org/",
+    "https://www.khanacademy.com/",
     "https://www.coursera.org/",
     "https://www.udemy.com/",
     "https://www.wolframalpha.com/",
@@ -155,14 +155,18 @@ func (sr *stressorRand) Intn(n int) int {
 }
 
 type XrayInstance struct {
-    Cmd      *exec.Cmd
-    Cfg      *parser.OutboundConfig
-    Port     int
-    ConfPath string
-    cleanup  func() // Функция очистки временного файла
-    done     chan struct{}
-    mu       sync.Mutex
-    proxyURL atomic.Value
+    Cmd        *exec.Cmd
+    Cfg        *parser.OutboundConfig
+    Port       int
+    ConfPath   string
+    cleanup    func()
+    done       chan struct{}
+    mu         sync.Mutex
+    proxyURL   atomic.Value
+    ChainProxy *config.ProxyEntry
+    reqCount   uint64 // Счетчик успешных запросов инстанса
+    errCount   uint64 // Счетчик ошибок инстанса
+    isRotating int32  // Флаг, что инстанс сейчас перезапускается
 }
 
 type Stressor struct {
@@ -195,6 +199,7 @@ type Stressor struct {
     cpuUsage      int32
     throttleMs    int32
     sem           chan struct{}
+    proxies       []config.ProxyEntry
 }
 
 var bufPool = sync.Pool{
@@ -302,7 +307,13 @@ func (s *Stressor) startInstance(i int) (*XrayInstance, error) {
         mutateCredentials(cfg)
     }
 
-    confPath, cleanup, err := config.GenerateWithPort(cfg, port)
+    var chainProxy *config.ProxyEntry
+    if len(s.proxies) > 0 {
+        cp := s.proxies[s.rand.Intn(len(s.proxies))]
+        chainProxy = &cp
+    }
+
+    confPath, cleanup, err := config.GenerateWithPort(cfg, port, chainProxy)
     if err != nil {
         return nil, fmt.Errorf("config generation: %w", err)
     }
@@ -312,17 +323,19 @@ func (s *Stressor) startInstance(i int) (*XrayInstance, error) {
     cmd.Stderr = nil
 
     if err := cmd.Start(); err != nil {
-        cleanup() // Убираем за собой файл, если xray не запустился
+        cleanup()
         return nil, err
     }
 
+    doneCh := make(chan struct{})
     inst := &XrayInstance{
-        Cmd:      cmd,
-        Cfg:      cfg,
-        Port:     port,
-        ConfPath: confPath,
-        cleanup:  cleanup,
-        done:     make(chan struct{}),
+        Cmd:        cmd,
+        Cfg:        cfg,
+        Port:       port,
+        ConfPath:   confPath,
+        cleanup:    cleanup,
+        done:       doneCh,
+        ChainProxy: chainProxy,
     }
     pURL, _ := url.Parse(fmt.Sprintf("socks5h://127.0.0.1:%d", port))
     inst.proxyURL.Store(pURL)
@@ -331,7 +344,7 @@ func (s *Stressor) startInstance(i int) (*XrayInstance, error) {
         if err := cmd.Wait(); err != nil && s.ctx.Err() == nil {
             log.Printf("[hellcat] ⚠️ xray [port %d] exited: %v", port, err)
         }
-        close(inst.done)
+        close(doneCh)
     }()
 
     return inst, nil
@@ -349,7 +362,23 @@ func (s *Stressor) restartInstance(inst *XrayInstance) {
 
     mutateCredentials(inst.Cfg)
 
-    newConfPath, newCleanup, err := config.GenerateWithPort(inst.Cfg, newPort)
+    var chainProxy *config.ProxyEntry
+    if len(s.proxies) > 0 {
+        if len(s.proxies) > 1 && inst.ChainProxy != nil {
+            for {
+                cp := s.proxies[s.rand.Intn(len(s.proxies))]
+                if cp.Raw != inst.ChainProxy.Raw {
+                    chainProxy = &cp
+                    break
+                }
+            }
+        } else {
+            cp := s.proxies[s.rand.Intn(len(s.proxies))]
+            chainProxy = &cp
+        }
+    }
+
+    newConfPath, newCleanup, err := config.GenerateWithPort(inst.Cfg, newPort, chainProxy)
     if err != nil {
         log.Printf("[hellcat] ❌ Failed to generate config for restart on port %d: %v", newPort, err)
         return
@@ -361,7 +390,7 @@ func (s *Stressor) restartInstance(inst *XrayInstance) {
 
     if err := cmd.Start(); err != nil {
         log.Printf("[hellcat] ❌ Failed to start new xray on port %d: %v", newPort, err)
-        newCleanup() // Удаляем новый файл, если процесс не стартовал
+        newCleanup()
         return
     }
 
@@ -395,7 +424,7 @@ func (s *Stressor) restartInstance(inst *XrayInstance) {
         if cmd.Process != nil {
             cmd.Process.Kill()
         }
-        newCleanup() // Удаляем новый файл, если прокси не прогрелся
+        newCleanup()
         select {
         case <-newDone:
         case <-time.After(shutdownTimeout):
@@ -412,6 +441,7 @@ func (s *Stressor) restartInstance(inst *XrayInstance) {
     inst.ConfPath = newConfPath
     inst.cleanup = newCleanup
     inst.done = newDone
+    inst.ChainProxy = chainProxy
 
     pURL, _ := url.Parse(fmt.Sprintf("socks5h://127.0.0.1:%d", newPort))
     inst.proxyURL.Store(pURL)
@@ -420,7 +450,7 @@ func (s *Stressor) restartInstance(inst *XrayInstance) {
         oldCmd.Process.Kill()
     }
     if oldCleanup != nil {
-        oldCleanup() // Вот здесь мы избавляемся от утечки старых файлов!
+        oldCleanup()
     }
     if oldDone != nil {
         select {
@@ -562,7 +592,7 @@ func (s *Stressor) applyThrottle() {
     }
 }
 
-func Run(parentCtx context.Context, cfgs []*parser.OutboundConfig, threads, duration, numXray int, insane, stealth bool, customTarget string, fakelogin bool, cpuTarget, maxInFlight int) {
+func Run(parentCtx context.Context, cfgs []*parser.OutboundConfig, threads, duration, numXray int, insane, stealth bool, customTarget string, fakelogin bool, cpuTarget, maxInFlight int, proxies []config.ProxyEntry) {
     if maxInFlight <= 0 {
         maxInFlight = defaultMaxInFlight
     }
@@ -583,6 +613,7 @@ func Run(parentCtx context.Context, cfgs []*parser.OutboundConfig, threads, dura
         stealthURLs: defaultStealthURLs,
         rand:        newStressorRand(),
         sem:         make(chan struct{}, maxInFlight),
+        proxies:     proxies,
     }
 
     if s.cpuTarget <= 0 {
@@ -704,16 +735,16 @@ func Run(parentCtx context.Context, cfgs []*parser.OutboundConfig, threads, dura
             continue
         }
         client := s.clients[i]
+        inst := s.instances[i]
         for j := 0; j < streamsPerProxy; j++ {
             s.wg.Add(1)
-            go s.worker(client)
+            go s.worker(client, inst)
         }
     }
 
     ticker := time.NewTicker(statsInterval)
     defer ticker.Stop()
 
-    var lastRotationReq uint64 = 0
     lastTickTime := time.Now()
 
     for {
@@ -738,22 +769,6 @@ func Run(parentCtx context.Context, cfgs []*parser.OutboundConfig, threads, dura
                 speed, succ, fail, atomic.LoadInt32(&s.activeWorkers),
                 inFlight, s.maxInFlight,
                 atomic.LoadInt32(&s.cpuUsage), atomic.LoadInt32(&s.throttleMs))
-
-            if s.fakeLogin && succ > 0 {
-                currentThousand := succ / 1000
-                lastThousand := lastRotationReq / 1000
-                if currentThousand > lastThousand {
-                    lastRotationReq = succ
-                    log.Printf("[hellcat] 🔑 Crossed %dk requests! Rotating...", currentThousand*1000)
-                    go func() {
-                        for _, inst := range s.instances {
-                            if inst != nil {
-                                s.restartInstance(inst)
-                            }
-                        }
-                    }()
-                }
-            }
         }
     }
 
@@ -778,7 +793,7 @@ cleanup:
     log.Println("[hellcat] ✅ Finished.")
 }
 
-func (s *Stressor) worker(client *http.Client) {
+func (s *Stressor) worker(client *http.Client, inst *XrayInstance) {
     defer s.wg.Done()
     atomic.AddInt32(&s.activeWorkers, 1)
     defer atomic.AddInt32(&s.activeWorkers, -1)
@@ -788,6 +803,18 @@ func (s *Stressor) worker(client *http.Client) {
         case <-s.ctx.Done():
             return
         default:
+            // Если инстанс сейчас перезапускается, воркеры ждут
+            if atomic.LoadInt32(&inst.isRotating) == 1 {
+                timer := time.NewTimer(100 * time.Millisecond)
+                select {
+                case <-s.ctx.Done():
+                    timer.Stop()
+                    return
+                case <-timer.C:
+                }
+                continue
+            }
+
             s.applyThrottle()
 
             for i := 0; i < s.burstSize; i++ {
@@ -796,9 +823,44 @@ func (s *Stressor) worker(client *http.Client) {
                     return
                 default:
                     if s.stealthMode {
-                        s.stealthSingle(client)
+                        s.stealthSingle(client, inst)
                     } else {
-                        s.downloadSingle(client)
+                        s.downloadSingle(client, inst)
+                    }
+                }
+            }
+
+            // Проверка на необходимость ротации (1000 запросов или 500 ошибок без успеха)
+            if s.fakeLogin {
+                reqs := atomic.LoadUint64(&inst.reqCount)
+                errs := atomic.LoadUint64(&inst.errCount)
+
+                if reqs >= 1000 || (reqs == 0 && errs >= 500) {
+                    // Пытаемся захватить блокировку ротации
+                    if atomic.CompareAndSwapInt32(&inst.isRotating, 0, 1) {
+                        if reqs >= 1000 {
+                            log.Printf("[hellcat] 🔑 Instance [Port %d] crossed 1000 requests. Rotating...", inst.Port)
+                        } else {
+                            log.Printf("[hellcat] 🔄 Instance [Port %d] too many errors (%d). Force rotating...", inst.Port, errs)
+                        }
+
+                        s.restartInstance(inst)
+
+                        // Сброс счетчиков
+                        atomic.StoreUint64(&inst.reqCount, 0)
+                        atomic.StoreUint64(&inst.errCount, 0)
+                        atomic.StoreInt32(&inst.isRotating, 0)
+                    } else {
+                        // Другой воркер уже ротирует, ждем
+                        for atomic.LoadInt32(&inst.isRotating) == 1 {
+                            timer := time.NewTimer(100 * time.Millisecond)
+                            select {
+                            case <-s.ctx.Done():
+                                timer.Stop()
+                                return
+                            case <-timer.C:
+                            }
+                        }
                     }
                 }
             }
@@ -818,7 +880,7 @@ func (s *Stressor) worker(client *http.Client) {
     }
 }
 
-func (s *Stressor) downloadSingle(client *http.Client) {
+func (s *Stressor) downloadSingle(client *http.Client, inst *XrayInstance) {
     if len(s.payloadURLs) == 0 {
         return
     }
@@ -837,6 +899,7 @@ func (s *Stressor) downloadSingle(client *http.Client) {
     req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
     if err != nil {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
         return
     }
 
@@ -847,6 +910,7 @@ func (s *Stressor) downloadSingle(client *http.Client) {
     resp, err := client.Do(req)
     if err != nil {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
         timer := time.NewTimer(errorSleepBase + time.Duration(s.rand.Int63n(int64(errorSleepJitter))))
         select {
         case <-ctx.Done():
@@ -859,6 +923,7 @@ func (s *Stressor) downloadSingle(client *http.Client) {
 
     if resp.ContentLength == 0 {
         atomic.AddUint64(&s.requests, 1)
+        atomic.AddUint64(&inst.reqCount, 1)
         return
     }
 
@@ -867,12 +932,14 @@ func (s *Stressor) downloadSingle(client *http.Client) {
 
     if ok {
         atomic.AddUint64(&s.requests, 1)
+        atomic.AddUint64(&inst.reqCount, 1)
     } else {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
     }
 }
 
-func (s *Stressor) stealthSingle(client *http.Client) {
+func (s *Stressor) stealthSingle(client *http.Client, inst *XrayInstance) {
     if len(s.stealthURLs) == 0 {
         return
     }
@@ -891,6 +958,7 @@ func (s *Stressor) stealthSingle(client *http.Client) {
     req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
     if err != nil {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
         return
     }
 
@@ -900,6 +968,7 @@ func (s *Stressor) stealthSingle(client *http.Client) {
     resp, err := client.Do(req)
     if err != nil {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
         timer := time.NewTimer(errorSleepBase + time.Duration(s.rand.Int63n(int64(errorSleepJitter))))
         select {
         case <-ctx.Done():
@@ -912,6 +981,7 @@ func (s *Stressor) stealthSingle(client *http.Client) {
 
     if resp.ContentLength == 0 {
         atomic.AddUint64(&s.requests, 1)
+        atomic.AddUint64(&inst.reqCount, 1)
         return
     }
 
@@ -920,7 +990,9 @@ func (s *Stressor) stealthSingle(client *http.Client) {
 
     if ok {
         atomic.AddUint64(&s.requests, 1)
+        atomic.AddUint64(&inst.reqCount, 1)
     } else {
         atomic.AddUint64(&s.errors, 1)
+        atomic.AddUint64(&inst.errCount, 1)
     }
 }

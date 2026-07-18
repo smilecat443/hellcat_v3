@@ -5,12 +5,16 @@ import (
     "context"
     "flag"
     "fmt"
+    "io"
     "log"
+    "net"
     "os"
     "os/signal"
     "path/filepath"
     "strings"
+    "sync"
     "syscall"
+    "time"
 
     "hellcat/config"
     "hellcat/parser"
@@ -40,6 +44,7 @@ func main() {
     fakelogin := flag.Bool("fakelogin", false, "Rotate UUID/Password every 1000 requests")
     cpuTarget := flag.Int("cpu", 0, "CPU usage target %% (0=auto: 70 normal, 85 insane)")
     maxInFlight := flag.Int("inflight", 0, "Max concurrent requests (0=default 10000)")
+    proxiesFile := flag.String("proxies", "", "File with upstream proxies (socks5://, http://, host:port) to chain before vless outbound")
     flag.Parse()
 
     switch {
@@ -72,6 +77,21 @@ func main() {
 
     log.Printf("[hellcat] ✅ Loaded %d proxy config(s)", len(configs))
 
+    var validProxies []config.ProxyEntry
+    if *proxiesFile != "" {
+        rawProxies, err := config.LoadProxyList(*proxiesFile)
+        if err != nil {
+            log.Fatalf("[!] %v", err)
+        }
+        log.Printf("[hellcat] 🛡️  Loaded %d proxies from file. Checking them (timeout 3s)...", len(rawProxies))
+        
+        validProxies = checkProxiesConcurrently(rawProxies)
+        if len(validProxies) == 0 {
+            log.Fatal("[!] No working proxies found. Aborting.")
+        }
+        log.Printf("[hellcat] ✅ %d proxies are alive and ready for chaining.", len(validProxies))
+    }
+
     stressor.Run(
         ctx,
         configs,
@@ -84,7 +104,78 @@ func main() {
         *fakelogin,
         *cpuTarget,
         *maxInFlight,
+        validProxies,
     )
+}
+
+// checkProxiesConcurrently проверяет прокси пачками по 100 штук
+func checkProxiesConcurrently(proxies []config.ProxyEntry) []config.ProxyEntry {
+    var valid []config.ProxyEntry
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    
+    sem := make(chan struct{}, 100) // Ограничиваем до 100 одновременных проверок
+    total := len(proxies)
+    checked := 0
+
+    for _, p := range proxies {
+        wg.Add(1)
+        go func(proxy config.ProxyEntry) {
+            defer wg.Done()
+            sem <- struct{}{}
+            defer func() { <-sem }()
+
+            if checkProxy(proxy) {
+                mu.Lock()
+                valid = append(valid, proxy)
+                mu.Unlock()
+            }
+
+            mu.Lock()
+            checked++
+            if checked%100 == 0 || checked == total {
+                log.Printf("[hellcat] 🔍 Checked %d/%d proxies... (Valid: %d)", checked, total, len(valid))
+            }
+            mu.Unlock()
+        }(p)
+    }
+
+    wg.Wait()
+    return valid
+}
+
+// checkProxy делает TCP коннект и базовый SOCKS5 хендшейк
+func checkProxy(p config.ProxyEntry) bool {
+    addr := fmt.Sprintf("%s:%d", p.Address, p.Port)
+    conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+    if err != nil {
+        return false
+    }
+    defer conn.Close()
+
+    // ВАЖНО: Устанавливаем дедлайн на чтение/запись, чтобы не зависнуть на "молчащих" сокетах
+    conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+    // Если SOCKS5 без пароля, отправляем хендшейк
+    if p.Protocol == "socks" && p.Username == "" {
+        // 0x05 = SOCKS version 5, 0x01 = 1 method, 0x00 = No Auth
+        _, err = conn.Write([]byte{0x05, 0x01, 0x00})
+        if err != nil {
+            return false
+        }
+        buf := make([]byte, 2)
+        _, err = io.ReadFull(conn, buf)
+        if err != nil {
+            return false
+        }
+        // Ждем ответ: 0x05 (SOCKS5), 0x00 (No Auth) или 0x02 (User/Pass) или 0xFF (No methods)
+        if buf[0] != 0x05 || buf[1] == 0xFF {
+            return false
+        }
+    }
+    
+    // Для HTTP и SOCKS5 с паролем достаточно успешного TCP-коннекта (делать полный хендшейк слишком долго)
+    return true
 }
 
 func cleanupTempFiles() {
